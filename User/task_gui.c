@@ -431,8 +431,8 @@ void task_guiInit()
 	{
 		TouchDriver_Poll();
 
-		//HAL_ADC_Start(&hadc3);
-		//HAL_ADC_PollForConversion(&hadc3, 10);
+		HAL_ADC_Start(&hadc3);
+		HAL_ADC_PollForConversion(&hadc3, 10);
 
 
 		if (!_Stop)
@@ -448,7 +448,7 @@ void task_guiInit()
 
 		GUI_Exec();
 		//osDelay(10);
-		m_speedAdc = HAL_ADC_GetValue(&hadc3);
+		m_speedAdc = HAL_ADC_GetValue(&hadc3) / 20;
 	}
 }
 
