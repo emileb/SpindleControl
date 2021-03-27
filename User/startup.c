@@ -28,7 +28,7 @@ void user_startup()
 	uartInit(&m_uartDevConsole, &huart1, &hdma_usart1_rx, NULL);
 	debug_init(&m_uartDevConsole);
 
-	task_gui(NULL);
+	//task_gui(NULL);
 
 	// Start RTOS tasks
 	task_commsInit();
