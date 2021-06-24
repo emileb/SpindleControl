@@ -1,0 +1,3 @@
+﻿[submodule "User/mcu_utils"]
+        path = User/mcu_utils
+        url = https://github.com/emileb/mcu_utils.git
