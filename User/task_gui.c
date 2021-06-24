@@ -5,21 +5,29 @@
  *      Author: emile
  */
 
-
 #include "cmsis_os.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include "debug.h"
+#include "user_input.h"
+#include "motor_status.h"
 
+#include "STemWin/STemWin.h"
 #include "DIALOG.h"
 #include <stdlib.h>
 #include <string.h>
 #include "GRAPH.h"
+#include "TEXT.h"
 
+#define SPINDLE_GEAR_RATIO (60.0 / 22.0) // We have a 60 tooth in the motor and 22 tooth on the spindle
 
-extern ADC_HandleTypeDef hadc3;
+#define GRAPH_WIDTH  480
+#define GRAPH_HEIGHT 200
 
-static uint16_t m_speedAdc;
+#define TEXT_TOP (GRAPH_HEIGHT + 15)
+
+#define SPEED_MAX_GRAPH 9000  // Maximm value to be displayed on the graph
+
 
 
 static osThreadId_t m_thread_id;
@@ -27,429 +35,139 @@ static osThreadId_t m_thread_id;
 static const osThreadAttr_t m_attributes =
 { .name = "task_gui", .priority = (osPriority_t) osPriorityNormal, .stack_size = 1024 * 16, };
 
- void task_gui(void *argument);
+static GRAPH_Handle m_hGraph;
+static GRAPH_DATA_Handle m_SpeedGraphData;
+static GRAPH_DATA_Handle m_TorqueGraphData;
 
+static TEXT_Handle m_statusText;
+static TEXT_Handle m_speedText;
+static TEXT_Handle m_torqueText;
 
+static TEXT_Handle m_commsErrText;
 
-/*********************************************************************
- *
- *       Defines
- *
- **********************************************************************
- */
-#define MAX_VALUE 150
+void task_gui(void *argument);
 
-/*********************************************************************
- *
- *       Static data
- *
- **********************************************************************
- */
-static GRAPH_DATA_Handle _ahData[3]; /* Array of handles for the GRAPH_DATA objects */
-static GRAPH_SCALE_Handle _hScaleV; /* Handle of vertical scale */
-static GRAPH_SCALE_Handle _hScaleH; /* Handle of horizontal scale */
-
-static I16 _aValue[3];
-static int _Stop;
-
-static GUI_COLOR _aColor[] =
-{ GUI_RED, GUI_GREEN, GUI_LIGHTBLUE }; /* Array of colors for the GRAPH_DATA objects */
-
-/* Dialog ressource */
-static const GUI_WIDGET_CREATE_INFO _aDialogCreate[] =
+static void createGui()
 {
-{ FRAMEWIN_CreateIndirect, "Graph widget demo", 0, 0, 0, 320, 240, FRAMEWIN_CF_MOVEABLE },
-{ GRAPH_CreateIndirect, 0, GUI_ID_GRAPH0, 5, 5, 270, 175 },
-{ TEXT_CreateIndirect, "Spacing X:", 0, 10, 185, 50, 20 },
-{ TEXT_CreateIndirect, "Spacing Y:", 0, 10, 205, 50, 20 },
-{ SLIDER_CreateIndirect, 0, GUI_ID_SLIDER0, 60, 185, 60, 16 },
-{ SLIDER_CreateIndirect, 0, GUI_ID_SLIDER1, 60, 205, 60, 16 },
-{ CHECKBOX_CreateIndirect, 0, GUI_ID_CHECK0, 130, 185, 50, 0 },
-{ CHECKBOX_CreateIndirect, 0, GUI_ID_CHECK1, 130, 205, 50, 0 },
-{ TEXT_CreateIndirect, "Border", 0, 280, 5, 35, 15 },
-{ CHECKBOX_CreateIndirect, 0, GUI_ID_CHECK2, 280, 20, 35, 0 },
-{ CHECKBOX_CreateIndirect, 0, GUI_ID_CHECK3, 280, 40, 35, 0 },
-{ CHECKBOX_CreateIndirect, 0, GUI_ID_CHECK4, 280, 60, 35, 0 },
-{ CHECKBOX_CreateIndirect, 0, GUI_ID_CHECK5, 280, 80, 35, 0 },
-{ TEXT_CreateIndirect, "Effect", 0, 280, 100, 35, 15 },
-{ RADIO_CreateIndirect, 0, GUI_ID_RADIO0, 275, 115, 35, 0, 0, 3 },
-{ CHECKBOX_CreateIndirect, 0, GUI_ID_CHECK6, 180, 185, 50, 0 },
-{ CHECKBOX_CreateIndirect, 0, GUI_ID_CHECK7, 180, 205, 50, 0 },
-{ BUTTON_CreateIndirect, "Full Screen", GUI_ID_BUTTON0, 235, 185, 65, 18 },
-{ CHECKBOX_CreateIndirect, 0, GUI_ID_CHECK8, 235, 205, 70, 0 }, };
+	WM_SetDesktopColor(GUI_BLACK);
+	WM_SetCreateFlags(WM_CF_MEMDEV);
 
-/*********************************************************************
- *
- *       Static code
- *
- **********************************************************************
- */
-/*********************************************************************
- *
- *       _AddValues
- *
- * Purpose:
- *   This routine calculates new random values in dependence of the previous added values
- *   and adds them to the GRAPH_DATA objects
- */
-extern int speed;
+	m_hGraph = GRAPH_CreateEx(10, 10, GRAPH_WIDTH, GRAPH_HEIGHT, WM_HBKWIN, WM_CF_SHOW, 0, GUI_ID_GRAPH0);
 
-static void _AddValues(WM_HWIN hGraph)
-{
-	int i;
-	for (i = 0; i < GUI_COUNTOF(_aColor); i++)
-	{
-		int Add = rand() % (2 + i * i);
-		int Vz = ((rand() % 2) << 1) - 1;
-		_aValue[i] += Add * Vz;
-		if (_aValue[i] > MAX_VALUE)
-		{
-			_aValue[i] = MAX_VALUE;
-		}
-		else if (_aValue[i] < 0)
-		{
-			_aValue[i] = 0;
-		}
-		//_aValue[0] = -speed;
-		_aValue[0] = m_speedAdc;
+	GRAPH_SetGridDistY(m_hGraph, 25);
+	GRAPH_SetGridVis(m_hGraph, 1);
+	GRAPH_SetGridFixedX(m_hGraph, 1);
 
-		GRAPH_DATA_YT_AddValue(_ahData[i], _aValue[i]);
-	}
+	GRAPH_SCALE_Handle scaleV = GRAPH_SCALE_Create(35, GUI_TA_RIGHT, GRAPH_SCALE_CF_VERTICAL, 20);
+	GRAPH_SCALE_SetTextColor(scaleV, GUI_YELLOW);
+	//GRAPH_SCALE_SetOff(scaleV, 75);
+	GRAPH_SCALE_SetFactor(scaleV, (float) SPEED_MAX_GRAPH / (float) GRAPH_HEIGHT);
+	GRAPH_AttachScale(m_hGraph, scaleV);
+
+	GRAPH_SCALE_Handle scaleH = GRAPH_SCALE_Create(GRAPH_HEIGHT / 2, GUI_TA_HCENTER, GRAPH_SCALE_CF_HORIZONTAL, 50);
+	GRAPH_SCALE_SetTextColor(scaleH, GUI_DARKGREEN);
+	GRAPH_SCALE_SetOff(scaleH, 0);
+	GRAPH_AttachScale(m_hGraph, scaleH);
+
+	m_SpeedGraphData = GRAPH_DATA_YT_Create(GUI_LIGHTBLUE, GRAPH_WIDTH, 0, 0);
+	m_TorqueGraphData = GRAPH_DATA_YT_Create(GUI_LIGHTRED, GRAPH_WIDTH, 0, 0);
+
+	GRAPH_AttachData(m_hGraph, m_SpeedGraphData);
+	GRAPH_AttachData(m_hGraph, m_TorqueGraphData);
+
+	m_statusText = TEXT_Create(0, TEXT_TOP + 15, 80, 50, 0, WM_CF_SHOW, "Hello", GUI_TA_HCENTER | GUI_TA_VCENTER);
+	TEXT_SetFont(m_statusText, GUI_FONT_32B_ASCII);
+	TEXT_SetBkColor(m_statusText, GUI_GRAY_50);
+
+	m_speedText = TEXT_Create(320, TEXT_TOP, 250, 50, 0, WM_CF_SHOW, "Hello", GUI_TA_LEFT | GUI_TA_VCENTER);
+	TEXT_SetFont(m_speedText, GUI_FONT_D48);
+	TEXT_SetTextColor(m_speedText, GUI_LIGHTBLUE);
+
+	m_torqueText = TEXT_Create(150, TEXT_TOP, 150, 50, 0, WM_CF_SHOW, "Hello", GUI_TA_LEFT | GUI_TA_VCENTER);
+	TEXT_SetFont(m_torqueText, GUI_FONT_D48);
+	TEXT_SetTextColor(m_torqueText, GUI_LIGHTRED);
+
+	m_commsErrText = TEXT_Create(350, 10, 150, 20, 0, WM_CF_SHOW, "Hello", GUI_TA_LEFT);
+	TEXT_SetFont(m_commsErrText, GUI_FONT_16_ASCII);
+	TEXT_SetTextColor(m_commsErrText, GUI_WHITE);
 }
 
-/*********************************************************************
- *
- *       _UserDraw
- *
- * Purpose:
- *   This routine is called by the GRAPH object before anything is drawn
- *   and after the last drawing operation.
- */
-static void _UserDraw(WM_HWIN hWin, int Stage)
+static int16_t getSpindleSpeed()
 {
-	if (Stage == GRAPH_DRAW_LAST)
-	{
-		char acText[] = "Temperature";
-		GUI_RECT Rect, RectInvalid;
-		int FontSizeY;
-		GUI_SetFont(&GUI_Font13_ASCII);
-		FontSizeY = GUI_GetFontSizeY();
-		WM_GetInsideRect(&Rect);
-		WM_GetInvalidRect(hWin, &RectInvalid);
-		Rect.x1 = Rect.x0 + FontSizeY;
-		GUI_SetColor(GUI_YELLOW);
-		GUI_DispStringInRectEx(acText, &Rect, GUI_TA_HCENTER, strlen(acText), GUI_ROTATE_CCW);
-	}
-}
+	float motorSpeed = motor_getSpeed();
 
-/*********************************************************************
- *
- *       _ForEach
- *
- * Purpose:
- *   This routine hides/shows all windows except the button, graph and scroll bar widgets
- */
-static void _ForEach(WM_HWIN hWin, void *pData)
-{
-	int Id, FullScreenMode;
-	FullScreenMode = *(int*) pData;
-	Id = WM_GetId(hWin);
-	if ((Id == GUI_ID_GRAPH0) || (Id == GUI_ID_BUTTON0) || (Id == GUI_ID_VSCROLL) || (Id == GUI_ID_HSCROLL))
-	{
-		return;
-	}
-	if (FullScreenMode)
-	{
-		WM_HideWindow(hWin);
-	}
-	else
-	{
-		WM_ShowWindow(hWin);
-	}
-}
-
-/*********************************************************************
- *
- *       _ToggleFullScreenMode
- *
- * Purpose:
- *   This routine switches between full screen mode and normal mode by hiding or showing the
- *   widgets of the dialog, enlarging/shrinking the graph widget and modifying some other
- *   attributes of the dialog widgets.
- */
-static void _ToggleFullScreenMode(WM_HWIN hDlg)
-{
-	static int FullScreenMode;
-	static GUI_RECT Rect;
-	static unsigned ScalePos;
-	WM_HWIN hGraph, hButton;
-	hGraph = WM_GetDialogItem(hDlg, GUI_ID_GRAPH0);
-	hButton = WM_GetDialogItem(hDlg, GUI_ID_BUTTON0);
-	FullScreenMode ^= 1;
-	if (FullScreenMode)
-	{
-		/* Enter the full screen mode */
-		WM_HWIN hClient;
-		GUI_RECT RectInside;
-		hClient = WM_GetClientWindow(hDlg);
-		BUTTON_SetText(hButton, "Back");
-		WM_MoveWindow(hButton, 0, 11);
-		FRAMEWIN_SetTitleVis(hDlg, 0);
-		WM_GetInsideRectEx(hClient, &RectInside);
-		WM_GetWindowRectEx(hGraph, &Rect);
-		WM_ForEachDesc(hClient, _ForEach, &FullScreenMode); /* Hide all descendants */
-		WM_SetWindowPos(hGraph, WM_GetWindowOrgX(hClient), WM_GetWindowOrgX(hClient), RectInside.x1, RectInside.y1);
-		ScalePos = GRAPH_SCALE_SetPos(_hScaleH, RectInside.y1 - 20);
-	}
-	else
-	{
-		/* Return to normal mode */
-		BUTTON_SetText(hButton, "Full Screen");
-		WM_MoveWindow(hButton, 0, -11);
-		WM_ForEachDesc(WM_GetClientWindow(hDlg), _ForEach, &FullScreenMode); /* Show all descendants */
-		WM_SetWindowPos(hGraph, Rect.x0, Rect.y0, Rect.x1 - Rect.x0 + 1, Rect.y1 - Rect.y0 + 1);
-		FRAMEWIN_SetTitleVis(hDlg, 1);
-		GRAPH_SCALE_SetPos(_hScaleH, ScalePos);
-	}
-}
-
-/*********************************************************************
- *
- *       _cbCallback
- *
- * Purpose:
- *   Callback function of the dialog
- */
-static void _cbCallback(WM_MESSAGE *pMsg)
-{
-	int i, NCode, Id, Value;
-	WM_HWIN hDlg, hItem;
-	hDlg = pMsg->hWin;
-	switch (pMsg->MsgId)
-	{
-	case WM_INIT_DIALOG:
-		hItem = WM_GetDialogItem(hDlg, GUI_ID_GRAPH0);
-		/* Add graphs */
-		for (i = 0; i < GUI_COUNTOF(_aColor); i++)
-		{
-			_aValue[i] = rand() % 180;
-			_ahData[i] = GRAPH_DATA_YT_Create(_aColor[i], 500, 0, 0);
-			GRAPH_AttachData(hItem, _ahData[i]);
-		}
-		/* Set graph attributes */
-		GRAPH_SetGridDistY(hItem, 25);
-		GRAPH_SetGridVis(hItem, 1);
-		GRAPH_SetGridFixedX(hItem, 1);
-		GRAPH_SetUserDraw(hItem, _UserDraw);
-		/* Create and add vertical scale */
-		_hScaleV = GRAPH_SCALE_Create(35, GUI_TA_RIGHT, GRAPH_SCALE_CF_VERTICAL, 25);
-		GRAPH_SCALE_SetTextColor(_hScaleV, GUI_YELLOW);
-		GRAPH_AttachScale(hItem, _hScaleV);
-		/* Create and add horizontal scale */
-		_hScaleH = GRAPH_SCALE_Create(155, GUI_TA_HCENTER, GRAPH_SCALE_CF_HORIZONTAL, 50);
-		GRAPH_SCALE_SetTextColor(_hScaleH, GUI_DARKGREEN);
-		GRAPH_AttachScale(hItem, _hScaleH);
-		/* Init check boxes */
-		hItem = WM_GetDialogItem(hDlg, GUI_ID_CHECK2);
-		CHECKBOX_SetText(hItem, "L");
-		hItem = WM_GetDialogItem(hDlg, GUI_ID_CHECK3);
-		CHECKBOX_SetText(hItem, "T");
-		hItem = WM_GetDialogItem(hDlg, GUI_ID_CHECK4);
-		CHECKBOX_SetText(hItem, "R");
-		hItem = WM_GetDialogItem(hDlg, GUI_ID_CHECK5);
-		CHECKBOX_SetText(hItem, "B");
-		hItem = WM_GetDialogItem(hDlg, GUI_ID_CHECK0);
-		CHECKBOX_SetText(hItem, "Stop");
-		hItem = WM_GetDialogItem(hDlg, GUI_ID_CHECK1);
-		CHECKBOX_SetText(hItem, "Grid");
-		CHECKBOX_SetState(hItem, 1);
-		hItem = WM_GetDialogItem(hDlg, GUI_ID_CHECK6);
-		CHECKBOX_SetText(hItem, "HScroll");
-		CHECKBOX_SetState(hItem, 1);
-		hItem = WM_GetDialogItem(hDlg, GUI_ID_CHECK7);
-		CHECKBOX_SetText(hItem, "VScroll");
-		hItem = WM_GetDialogItem(hDlg, GUI_ID_CHECK8);
-		CHECKBOX_SetText(hItem, "MirrorX");
-		/* Init slider widgets */
-		hItem = WM_GetDialogItem(hDlg, GUI_ID_SLIDER0);
-		SLIDER_SetRange(hItem, 0, 10);
-		SLIDER_SetValue(hItem, 5);
-		SLIDER_SetNumTicks(hItem, 6);
-		hItem = WM_GetDialogItem(hDlg, GUI_ID_SLIDER1);
-		SLIDER_SetRange(hItem, 0, 20);
-		SLIDER_SetValue(hItem, 5);
-		SLIDER_SetNumTicks(hItem, 6);
-		/* Init radio widget */
-		hItem = WM_GetDialogItem(hDlg, GUI_ID_RADIO0);
-		RADIO_SetText(hItem, "3D", 0);
-		RADIO_SetText(hItem, "flat", 1);
-		RADIO_SetText(hItem, "-", 2);
-		/* Init button widget */
-		hItem = WM_GetDialogItem(hDlg, GUI_ID_BUTTON0);
-		WM_SetStayOnTop(hItem, 1);
-		break;
-	case WM_NOTIFY_PARENT:
-		Id = WM_GetId(pMsg->hWinSrc); /* Id of widget */
-		NCode = pMsg->Data.v; /* Notification code */
-		switch (NCode)
-		{
-		case WM_NOTIFICATION_CLICKED:
-			switch (Id)
-			{
-			case GUI_ID_BUTTON0:
-				_ToggleFullScreenMode(hDlg);
-				break;
-			}
-			break;
-		case WM_NOTIFICATION_VALUE_CHANGED:
-			switch (Id)
-			{
-			case GUI_ID_CHECK0:
-				/* Toggle stop mode */
-				_Stop ^= 1;
-				break;
-			case GUI_ID_CHECK1:
-				/* Toggle grid */
-				hItem = WM_GetDialogItem(hDlg, GUI_ID_GRAPH0);
-				GRAPH_SetGridVis(hItem, CHECKBOX_IsChecked(WM_GetDialogItem(hDlg, GUI_ID_CHECK1)));
-				break;
-			case GUI_ID_CHECK2:
-			case GUI_ID_CHECK3:
-			case GUI_ID_CHECK4:
-			case GUI_ID_CHECK5:
-				/* Toggle border */
-				hItem = WM_GetDialogItem(hDlg, GUI_ID_GRAPH0);
-				GRAPH_SetBorder(hItem, CHECKBOX_IsChecked(WM_GetDialogItem(hDlg, GUI_ID_CHECK2)) * 40,
-						CHECKBOX_IsChecked(WM_GetDialogItem(hDlg, GUI_ID_CHECK3)) * 5,
-						CHECKBOX_IsChecked(WM_GetDialogItem(hDlg, GUI_ID_CHECK4)) * 5,
-						CHECKBOX_IsChecked(WM_GetDialogItem(hDlg, GUI_ID_CHECK5)) * 5);
-				break;
-			case GUI_ID_SLIDER0:
-				/* Set horizontal grid spacing */
-				hItem = WM_GetDialogItem(hDlg, GUI_ID_GRAPH0);
-				Value = SLIDER_GetValue(pMsg->hWinSrc) * 10;
-				GRAPH_SetGridDistX(hItem, Value);
-				GRAPH_SCALE_SetTickDist(_hScaleH, Value);
-				break;
-			case GUI_ID_SLIDER1:
-				/* Set vertical grid spacing */
-				hItem = WM_GetDialogItem(hDlg, GUI_ID_GRAPH0);
-				Value = SLIDER_GetValue(pMsg->hWinSrc) * 5;
-				GRAPH_SetGridDistY(hItem, Value);
-				GRAPH_SCALE_SetTickDist(_hScaleV, Value);
-				break;
-			case GUI_ID_RADIO0:
-				/* Set the widget effect */
-				hItem = WM_GetDialogItem(hDlg, GUI_ID_GRAPH0);
-				switch (RADIO_GetValue(pMsg->hWinSrc))
-				{
-				case 0:
-					WIDGET_SetEffect(hItem, &WIDGET_Effect_3D);
-					break;
-				case 1:
-					WIDGET_SetEffect(hItem, &WIDGET_Effect_Simple);
-					break;
-				case 2:
-					WIDGET_SetEffect(hItem, &WIDGET_Effect_None);
-					break;
-				}
-				break;
-			case GUI_ID_CHECK6:
-				/* Toggle horizontal scroll bar */
-				hItem = WM_GetDialogItem(hDlg, GUI_ID_GRAPH0);
-				if (CHECKBOX_IsChecked(WM_GetDialogItem(hDlg, GUI_ID_CHECK6)))
-				{
-					GRAPH_SetVSizeX(hItem, 500);
-				}
-				else
-				{
-					GRAPH_SetVSizeX(hItem, 0);
-				}
-				break;
-			case GUI_ID_CHECK7:
-				/* Toggle vertical scroll bar */
-				hItem = WM_GetDialogItem(hDlg, GUI_ID_GRAPH0);
-				if (CHECKBOX_IsChecked(WM_GetDialogItem(hDlg, GUI_ID_CHECK7)))
-				{
-					GRAPH_SetVSizeY(hItem, 300);
-				}
-				else
-				{
-					GRAPH_SetVSizeY(hItem, 0);
-				}
-				break;
-			case GUI_ID_CHECK8:
-				/* Toggle alignment */
-				hItem = WM_GetDialogItem(hDlg, GUI_ID_GRAPH0);
-				for (i = 0; i < GUI_COUNTOF(_aColor); i++)
-				{
-					if (CHECKBOX_IsChecked(WM_GetDialogItem(hDlg, GUI_ID_CHECK8)))
-					{
-						GRAPH_DATA_YT_SetAlign(_ahData[i], GRAPH_ALIGN_LEFT);
-						GRAPH_DATA_YT_MirrorX(_ahData[i], 1);
-					}
-					else
-					{
-						GRAPH_DATA_YT_SetAlign(_ahData[i], GRAPH_ALIGN_RIGHT);
-						GRAPH_DATA_YT_MirrorX(_ahData[i], 0);
-					}
-				}
-				break;
-			}
-			break;
-		}
-		break;
-	default:
-		WM_DefaultProc(pMsg);
-	}
+	return (int16_t) (motorSpeed * SPINDLE_GEAR_RATIO);
 }
 
 void task_guiInit()
 {
 	m_thread_id = osThreadNew(task_gui, NULL, &m_attributes);
-	//task_comms(0);
 }
 
-
- void task_gui(void *argument)
+void task_gui(void *argument)
 {
 	PRINTF("task_gui STARTED\r\n");
 
 	GRAPHICS_Init();
 
-	WM_HWIN hDlg, hGraph = 0;
+	//GUI_CURSOR_Show();
 
-	GUI_CURSOR_Show();
-	WM_SetDesktopColor(GUI_BLACK);
-#if GUI_SUPPORT_MEMDEV
-	WM_SetCreateFlags(WM_CF_MEMDEV);
-#endif
-
-	hDlg = GUI_CreateDialogBox(_aDialogCreate, GUI_COUNTOF(_aDialogCreate), &_cbCallback, 0, 0, 0);
+	createGui();
 
 	while (true)
 	{
-		TouchDriver_Poll();
-
-		HAL_ADC_Start(&hadc3);
-		HAL_ADC_PollForConversion(&hadc3, 10);
-
-
-		if (!_Stop)
-		{
-			if (!hGraph)
-			{
-				hGraph = WM_GetDialogItem(hDlg, GUI_ID_GRAPH0);
-			}
-			_AddValues(hGraph);
-		}
-
-		PRINTF("tick\r\n");
+		//TouchDriver_Poll();
 
 		GUI_Exec();
-		//osDelay(10);
-		m_speedAdc = HAL_ADC_GetValue(&hadc3) / 20;
+
+		// The graph is done in pixels, need to scale the data to fit
+		float spindleSpeed = getSpindleSpeed();
+		spindleSpeed = spindleSpeed * GRAPH_HEIGHT;
+		spindleSpeed = spindleSpeed / SPEED_MAX_GRAPH;
+
+		GRAPH_DATA_YT_AddValue(m_SpeedGraphData, spindleSpeed);
+
+		// Torque is in %
+		float torque = motor_getTorque();
+		torque = torque * 3; // Scale up a bit
+		GRAPH_DATA_YT_AddValue(m_TorqueGraphData, torque);
+
+		// Show ON/OFF status
+		bool enabled = motor_getEnabled();
+		if (enabled)
+		{
+			static int32_t flash = 0;
+			flash++;
+			TEXT_SetTextColor(m_statusText, GUI_LIGHTRED);
+			if (flash & 0x10)
+				TEXT_SetText(m_statusText, "ON");
+			else
+				TEXT_SetText(m_statusText, "");
+		}
+		else
+		{
+			TEXT_SetTextColor(m_statusText, GUI_LIGHTGREEN);
+			TEXT_SetText(m_statusText, "OFF");
+		}
+
+		// Speed text
+		char buff[32];
+		//TEXT_SetDec(m_speedText, (int)getSpindleSpeed(), 5,0,1, 1); // This make it flash badly
+		int32_t speedDisplay = (int) getSpindleSpeed();
+		speedDisplay = (speedDisplay / 50) * 50; // Only show resolution of 50's
+		sprintf(buff, "%04d", speedDisplay);
+		TEXT_SetText(m_speedText, buff);
+
+		// Torque text
+		int16_t torqueDisplay = motor_getTorque();
+		static float torqueAverage = 0;
+		torqueAverage = (0.9 * torqueAverage) + (0.1 * torqueDisplay);
+		sprintf(buff, "%02d%%", (int) torqueAverage);
+		TEXT_SetText(m_torqueText, buff);
+
+
+		sprintf(buff, "Comms errors: %d", motor_getCommsErrors());
+		TEXT_SetText(m_commsErrText, buff);
 	}
 }
-
 
