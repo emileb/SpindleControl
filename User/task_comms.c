@@ -117,11 +117,11 @@ static void task_comms(void *argument)
 
 		bool error = false;
 
-		int16_t speed = readSingleRegister(REG_SPEED, &error);
+		int16_t speed = -readSingleRegister(REG_SPEED, &error); // NOTE, invert the negative speed here
 		if(!error)
 			motor_setSpeed(speed);
 
-		int16_t torque = readSingleRegister(REG_TORQUE, &error);
+		int16_t torque = -readSingleRegister(REG_TORQUE, &error); // NOTE, invert the negative torque
 		if(!error)
 			motor_setTorque(torque);
 
@@ -142,7 +142,7 @@ static void task_comms(void *argument)
 		int rpm = ui_getSetRPM();
 		if(m_ready && (oldRPM != rpm))
 		{
-			modbus_sendWriteReg(&m_modbusSpindle, 1, REG_WRITE_SPEED, rpm);
+			modbus_sendWriteReg(&m_modbusSpindle, 1, REG_WRITE_SPEED, -rpm); // NOTE! Need to send negative speed to go clockwise
 			osDelay(5);
 			if(!modbus_checkReceive(&m_modbusSpindle))
 				m_commsErrors++;
